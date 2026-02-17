@@ -274,11 +274,23 @@ const SK = 'tcc_v2';
 const SYNC_URL = 'https://script.google.com/macros/s/AKfycbyw8dunNs_4ind663PS7BO_RF0Ed0JC6mY5CVqyceqJu7EyDrDEgKYzyNxY7Z495hOS/exec';
 // Example: const SYNC_URL = 'https://script.google.com/macros/s/AKfycbx.../exec';
 
+// SET YOUR PASSWORD HERE (used to lock the app + secure the API)
+const APP_PASSWORD = 'YassineADY2812!';
+// Example: const APP_PASSWORD = 'mySecretPass123';
+
+const AUTH_KEY = 'tcc_auth';
+const isAuthenticated = () => {
+  if(!APP_PASSWORD) return true; // no password set = open access
+  return sessionStorage.getItem(AUTH_KEY) === APP_PASSWORD;
+};
+
 const cloudGet = async () => {
   if(!SYNC_URL) return null;
   try {
-    const res = await fetch(SYNC_URL + '?method=get');
-    const json = await res.json();
+    const url = SYNC_URL + '?method=get' + (APP_PASSWORD ? '&token=' + encodeURIComponent(APP_PASSWORD) : '');
+    const res = await fetch(url, { redirect: 'follow' });
+    const text = await res.text();
+    const json = JSON.parse(text);
     return json.success && json.data ? json.data : null;
   } catch(e) { console.warn('Cloud GET failed:', e); return null; }
 };
@@ -289,14 +301,18 @@ const cloudSave = async (data) => {
     // Strip screenshots from the cloud save to avoid size limits
     const lite = {
       ...data,
-      trades: data.trades.map(t => ({...t, screenshots: undefined})),
-      journal: data.journal.map(j => ({...j, screenshots: undefined})),
-      analyses: data.analyses.map(a => ({...a, screenshots: undefined})),
+      trades: data.trades.map(t => { const {screenshots, ...rest} = t; return rest; }),
+      journal: data.journal.map(j => { const {screenshots, ...rest} = j; return rest; }),
+      analyses: data.analyses.map(a => { const {screenshots, ...rest} = a; return rest; }),
     };
-    const res = await fetch(SYNC_URL + '?method=save', {
-      method: 'POST', body: JSON.stringify(lite),
+    const url = SYNC_URL + '?method=save' + (APP_PASSWORD ? '&token=' + encodeURIComponent(APP_PASSWORD) : '');
+    const res = await fetch(url, {
+      method: 'POST',
+      redirect: 'follow',
+      body: JSON.stringify(lite),
     });
-    const json = await res.json();
+    const text = await res.text();
+    const json = JSON.parse(text);
     return json.success;
   } catch(e) { console.warn('Cloud SAVE failed:', e); return false; }
 };
@@ -432,6 +448,46 @@ function detectAsset(sym) {
   if(/BTC|ETH|XRP|SOL|ADA|DOGE/i.test(s)) return 'Crypto';
   if(/US30|US500|NAS100|SPX|NDX|DAX|FTSE|S&P|NASDAQ/i.test(s)) return 'Indices';
   return 'Stocks';
+}
+
+// ─── LOGIN SCREEN ───
+function LoginScreen({onLogin}) {
+  const [pw,setPw] = useState('');
+  const [error,setError] = useState(false);
+  const submit = () => {
+    if(pw === APP_PASSWORD) {
+      sessionStorage.setItem(AUTH_KEY, pw);
+      onLogin();
+    } else {
+      setError(true);
+      setTimeout(()=>setError(false), 1500);
+    }
+  };
+  return (
+    <div style={{height:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg-sidebar)',flexDirection:'column',gap:'20px'}}>
+      <div style={{textAlign:'center'}}>
+        <div style={{width:'48px',height:'48px',background:'var(--sidebar-accent)',borderRadius:'12px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'24px',margin:'0 auto 12px'}}>⚡</div>
+        <div style={{color:'white',fontSize:'18px',fontWeight:700,fontFamily:'var(--font)',letterSpacing:'-0.3px'}}>Trading HQ</div>
+        <div style={{color:'var(--sidebar-text)',fontSize:'12px',fontFamily:'var(--font)',marginTop:'2px'}}>Command Center</div>
+      </div>
+      <div style={{display:'flex',gap:'8px'}}>
+        <input type="password" value={pw} onChange={e=>setPw(e.target.value)}
+          onKeyDown={e=>{if(e.key==='Enter')submit();}}
+          placeholder="Password"
+          style={{padding:'9px 14px',borderRadius:'8px',border:error?'2px solid var(--red)':'2px solid transparent',background:'rgba(255,255,255,0.08)',color:'white',fontSize:'14px',fontFamily:'var(--font)',outline:'none',width:'200px',transition:'border 0.2s'}}
+          autoFocus />
+        <button onClick={submit} style={{padding:'9px 18px',borderRadius:'8px',background:'var(--sidebar-accent)',color:'white',border:'none',fontSize:'13px',fontWeight:600,fontFamily:'var(--font)',cursor:'pointer'}}>Unlock</button>
+      </div>
+      {error && <div style={{color:'var(--red)',fontSize:'12.5px',fontFamily:'var(--font)'}}>Wrong password</div>}
+    </div>
+  );
+}
+
+// ─── APP WRAPPER ───
+function AppWrapper() {
+  const [authed, setAuthed] = useState(isAuthenticated());
+  if(APP_PASSWORD && !authed) return <LoginScreen onLogin={()=>setAuthed(true)} />;
+  return <App />;
 }
 
 // ─── APP ───
@@ -1656,7 +1712,7 @@ function ImportPage({importTrades,exportAllData,importAllData}) {
 }
 
 // ─── RENDER ───
-ReactDOM.render(<App/>,document.getElementById('root'));
+ReactDOM.render(<AppWrapper/>,document.getElementById('root'));
 </script>
 </body>
 </html>
