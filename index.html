@@ -734,18 +734,117 @@ function SessionTimeline() {
   );
 }
 
+// ─── CHART COMPONENT (SVG) ───
+function MiniChart({dataPoints, width=600, height=160, color='var(--accent)', showZero=true, formatY=fmtC, labels=null}) {
+  if(!dataPoints||dataPoints.length<2) return null;
+  const vals = dataPoints.map(d=>d.y);
+  const yMin = Math.min(0,...vals), yMax = Math.max(0,...vals);
+  const yRange = yMax-yMin||1;
+  const pad = {t:10,b:28,l:60,r:10};
+  const w = width-pad.l-pad.r, h = height-pad.t-pad.b;
+  const scaleX = (i) => pad.l + (i/(dataPoints.length-1))*w;
+  const scaleY = (v) => pad.t + h - ((v-yMin)/yRange)*h;
+  const pts = dataPoints.map((d,i) => `${scaleX(i)},${scaleY(d.y)}`).join(' ');
+  // Area fill
+  const area = `${pad.l},${scaleY(0)} ${pts} ${pad.l+w},${scaleY(0)}`;
+  // Y gridlines
+  const yTicks = 5;
+  const yLines = Array.from({length:yTicks},(_, i)=>{
+    const v = yMin + (yRange/(yTicks-1))*i;
+    return {v, y:scaleY(v)};
+  });
+  // X labels
+  const xLabelCount = Math.min(dataPoints.length, 6);
+  const xStep = Math.max(1, Math.floor((dataPoints.length-1)/(xLabelCount-1)));
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} style={{width:'100%',height:'auto',display:'block'}}>
+      {yLines.map((l,i)=>(
+        <React.Fragment key={i}>
+          <line x1={pad.l} x2={width-pad.r} y1={l.y} y2={l.y} stroke="var(--border)" strokeWidth="0.5" strokeDasharray={l.v===0?"":"2,3"}/>
+          <text x={pad.l-6} y={l.y+3.5} textAnchor="end" fill="var(--text-3)" fontSize="9" fontFamily="var(--mono)">{formatY(l.v)}</text>
+        </React.Fragment>
+      ))}
+      {showZero && yMin<0 && yMax>0 && <line x1={pad.l} x2={width-pad.r} y1={scaleY(0)} y2={scaleY(0)} stroke="var(--text-3)" strokeWidth="0.8"/>}
+      <polygon points={area} fill={color} opacity="0.08"/>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
+      {dataPoints.map((d,i)=>(
+        <circle key={i} cx={scaleX(i)} cy={scaleY(d.y)} r={dataPoints.length>30?"1.5":"3"} fill={color} opacity="0.7">
+          <title>{d.label}: {formatY(d.y)}</title>
+        </circle>
+      ))}
+      {dataPoints.filter((_,i)=>i%xStep===0||i===dataPoints.length-1).map((d,i)=>(
+        <text key={i} x={scaleX(dataPoints.indexOf(d))} y={height-4} textAnchor="middle" fill="var(--text-3)" fontSize="8.5" fontFamily="var(--mono)">{d.label}</text>
+      ))}
+    </svg>
+  );
+}
+
 // ─── DASHBOARD ───
 function Dashboard({stats,data,open,closed,planCompliance,sessionStats,activeSessions}) {
   const recent = useMemo(()=>[...data.trades].sort((a,b)=>new Date(b.openDate||0)-new Date(a.openDate||0)).slice(0,6),[data.trades]);
   const todayJournal = data.journal.filter(j=>j.date===today());
   const todayAnalyses = data.analyses.filter(a=>a.date===today());
+  const [plRange,setPlRange] = useState('all');
 
-  // Equity curve data points
-  const equityCurve = useMemo(()=>{
+  // P&L over time with date filter
+  const plData = useMemo(()=>{
     const sorted = [...closed].sort((a,b)=>new Date(a.closeDate||a.openDate||0)-new Date(b.closeDate||b.openDate||0));
-    let cum=0;
-    return sorted.map(t=>{cum+=Number(t.pnl)||0;return cum;});
-  },[closed]);
+    if(!sorted.length) return [];
+    // Date filter
+    const now = new Date();
+    let cutoff = null;
+    if(plRange==='1w') cutoff = new Date(now - 7*86400000);
+    else if(plRange==='1m') cutoff = new Date(now - 30*86400000);
+    else if(plRange==='3m') cutoff = new Date(now - 90*86400000);
+    else if(plRange==='6m') cutoff = new Date(now - 180*86400000);
+    else if(plRange==='ytd') cutoff = new Date(now.getFullYear(),0,1);
+
+    let cum = 0;
+    const all = sorted.map(t => {
+      cum += Number(t.pnl)||0;
+      const d = t.closeDate||t.openDate||'';
+      return {date:d, y:cum, label:d.slice(5,10)};
+    });
+    if(!cutoff) return all;
+    // Find starting equity at cutoff
+    const cutStr = cutoff.toISOString().slice(0,10);
+    const before = all.filter(p => p.date < cutStr);
+    const startEquity = before.length ? before[before.length-1].y : 0;
+    const after = all.filter(p => p.date >= cutStr).map(p => ({...p, y: p.y - startEquity}));
+    return after.length ? after : all;
+  },[closed,plRange]);
+
+  // Key Success Indicator — plan compliance over time
+  const [ksiRange,setKsiRange] = useState('weekly'); // daily | weekly | monthly
+  const complianceOverTime = useMemo(()=>{
+    const withPlan = [...closed].filter(t=>t.followedPlan!=null&&(t.closeDate||t.openDate));
+    if(withPlan.length<2) return [];
+    const sorted = withPlan.sort((a,b)=>new Date(a.closeDate||a.openDate||0)-new Date(b.closeDate||b.openDate||0));
+    const buckets = {};
+    sorted.forEach(t=>{
+      const d = new Date(t.closeDate||t.openDate);
+      let k, label;
+      if(ksiRange==='daily') {
+        k = (t.closeDate||t.openDate).slice(0,10);
+        label = k.slice(5,10);
+      } else if(ksiRange==='weekly') {
+        const ws = new Date(d); ws.setDate(d.getDate()-((d.getDay()+6)%7));
+        k = ws.toISOString().slice(0,10);
+        label = k.slice(5,10);
+      } else {
+        k = (t.closeDate||t.openDate).slice(0,7);
+        label = k;
+      }
+      if(!buckets[k]) buckets[k]={total:0,followed:0,label};
+      buckets[k].total++;
+      if(t.followedPlan) buckets[k].followed++;
+    });
+    return Object.entries(buckets).sort((a,b)=>a[0].localeCompare(b[0])).map(([_,v])=>({
+      label: v.label,
+      y: v.total>0 ? Math.round(v.followed/v.total*100) : 0,
+    }));
+  },[closed,ksiRange]);
 
   return (
     <div>
@@ -789,6 +888,57 @@ function Dashboard({stats,data,open,closed,planCompliance,sessionStats,activeSes
           <div className="stat-value neutral">{open.length}</div>
           <div className="stat-sub">Active now</div>
         </div>
+      </div>
+
+      {/* P&L Evolution Chart */}
+      <div className="card">
+        <div className="card-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div className="card-title">P&L Evolution</div>
+          <div style={{display:'flex',gap:'4px'}}>
+            {[['1w','1W'],['1m','1M'],['3m','3M'],['6m','6M'],['ytd','YTD'],['all','All']].map(([v,l])=>(
+              <button key={v} onClick={()=>setPlRange(v)} style={{padding:'3px 10px',borderRadius:'6px',border:'1px solid '+(plRange===v?'var(--accent)':'var(--border)'),background:plRange===v?'var(--accent-light)':'transparent',color:plRange===v?'var(--accent)':'var(--text-3)',fontSize:'11px',fontWeight:600,cursor:'pointer',fontFamily:'var(--font)',transition:'all 0.12s'}}>{l}</button>
+            ))}
+          </div>
+        </div>
+        {plData.length >= 2 ? (
+          <MiniChart dataPoints={plData} color={plData[plData.length-1]?.y>=0?'var(--green)':'var(--red)'} />
+        ) : (
+          <div className="empty-state"><div className="empty-state-icon">📈</div><div className="empty-state-text">Not enough data for this period</div><div className="empty-state-sub">Close more trades to see your P&L curve</div></div>
+        )}
+      </div>
+
+      {/* Key Success Indicator */}
+      <div className="card">
+        <div className="card-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div className="card-title">Key Success Indicator</div>
+          <div style={{display:'flex',gap:'4px'}}>
+            {[['daily','Daily'],['weekly','Weekly'],['monthly','Monthly']].map(([v,l])=>(
+              <button key={v} onClick={()=>setKsiRange(v)} style={{padding:'3px 10px',borderRadius:'6px',border:'1px solid '+(ksiRange===v?'var(--accent)':'var(--border)'),background:ksiRange===v?'var(--accent-light)':'transparent',color:ksiRange===v?'var(--accent)':'var(--text-3)',fontSize:'11px',fontWeight:600,cursor:'pointer',fontFamily:'var(--font)',transition:'all 0.12s'}}>{l}</button>
+            ))}
+          </div>
+        </div>
+        <div style={{fontSize:'12.5px',color:'var(--text-3)',marginBottom:'10px'}}>Plan compliance rate — {ksiRange} view</div>
+        {complianceOverTime.length >= 2 ? (
+          <MiniChart dataPoints={complianceOverTime} color="var(--accent)" formatY={v=>`${v}%`} showZero={false} />
+        ) : (
+          <div className="empty-state"><div className="empty-state-icon">🎯</div><div className="empty-state-text">Not enough data yet</div><div className="empty-state-sub">Tag your trades with "Followed Plan" to track compliance over time</div></div>
+        )}
+        {planCompliance && (
+          <div style={{display:'flex',gap:'16px',marginTop:'10px',flexWrap:'wrap'}}>
+            <div style={{padding:'8px 14px',borderRadius:'8px',background:planCompliance.rate>=70?'var(--green-bg)':'var(--red-bg)',border:`1px solid ${planCompliance.rate>=70?'var(--green-border)':'var(--red-border)'}`,fontSize:'12.5px'}}>
+              <span style={{fontWeight:600,color:planCompliance.rate>=70?'var(--green)':'var(--red)'}}>{fmt(planCompliance.rate,0)}%</span>
+              <span style={{color:'var(--text-2)',marginLeft:'6px'}}>overall compliance</span>
+            </div>
+            <div style={{padding:'8px 14px',borderRadius:'8px',background:'var(--bg-hover)',fontSize:'12.5px'}}>
+              <span style={{fontWeight:600,color:'var(--text-1)'}}>{fmtC(planCompliance.pnlFollowed)}</span>
+              <span style={{color:'var(--text-3)',marginLeft:'6px'}}>when following</span>
+            </div>
+            <div style={{padding:'8px 14px',borderRadius:'8px',background:'var(--bg-hover)',fontSize:'12.5px'}}>
+              <span style={{fontWeight:600,color:'var(--text-1)'}}>{fmtC(planCompliance.pnlNotFollowed)}</span>
+              <span style={{color:'var(--text-3)',marginLeft:'6px'}}>when breaking</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Plan Compliance + Decision Aid */}
@@ -882,30 +1032,13 @@ function Dashboard({stats,data,open,closed,planCompliance,sessionStats,activeSes
       {/* Today's Activity */}
       <div className="card">
         <div className="card-header"><div className="card-title">Today's Activity</div></div>
-        <div style={{display:'flex',gap:'20px',fontSize:'13px',color:'var(--text-2)'}}>
+        <div style={{display:'flex',gap:'20px',fontSize:'13px',color:'var(--text-2)',flexWrap:'wrap'}}>
           <span>📊 <strong>{data.trades.filter(t=>t.openDate===today()).length}</strong> trades opened today</span>
           <span>🔍 <strong>{todayAnalyses.length}</strong> pre-session analyses</span>
           <span>📓 <strong>{todayJournal.length}</strong> journal entries</span>
           <span>✅ <strong>{data.planRules.filter(r=>r.checked).length}/{data.planRules.length}</strong> rules checked</span>
         </div>
       </div>
-
-      {/* Equity Curve (simple text-based) */}
-      {equityCurve.length > 1 && (
-        <div className="card">
-          <div className="card-header"><div className="card-title">Equity Curve</div></div>
-          <div style={{display:'flex',alignItems:'flex-end',gap:'2px',height:'80px'}}>
-            {equityCurve.map((v,i)=>{
-              const max=Math.max(...equityCurve.map(Math.abs));
-              const h = max>0?Math.abs(v)/max*70:0;
-              return <div key={i} style={{flex:1,height:`${Math.max(h,2)}px`,background:v>=0?'var(--green)':'var(--red)',borderRadius:'2px 2px 0 0',opacity:0.7+0.3*(i/equityCurve.length)}} title={fmtC(v)} />;
-            })}
-          </div>
-          <div style={{display:'flex',justifyContent:'space-between',marginTop:'4px',fontSize:'10px',color:'var(--text-3)',fontFamily:'var(--mono)'}}>
-            <span>First trade</span><span>Latest</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1296,6 +1429,9 @@ function JournalModal({onClose,onSave}) {
 
 // ─── STATISTICS ───
 function Statistics({stats,closed,sessionStats,planCompliance}) {
+  const [periodView,setPeriodView] = useState('monthly'); // weekly | monthly
+  const [selectedPeriod,setSelectedPeriod] = useState(''); // YYYY-MM or YYYY-Wxx
+
   const byAsset = useMemo(()=>{
     const m={};closed.forEach(t=>{const c=t.assetClass||'Other';if(!m[c])m[c]={trades:0,wins:0,pnl:0};m[c].trades++;if((Number(t.pnl)||0)>0)m[c].wins++;m[c].pnl+=Number(t.pnl)||0;});
     return Object.entries(m).map(([name,d])=>({name,...d,wr:d.trades>0?d.wins/d.trades*100:0})).sort((a,b)=>b.pnl-a.pnl);
@@ -1308,6 +1444,68 @@ function Statistics({stats,closed,sessionStats,planCompliance}) {
     return days.map(d=>({day:d,...m[d],wr:m[d].trades>0?m[d].wins/m[d].trades*100:0}));
   },[closed]);
 
+  // Helper: get ISO week number
+  const getWeekKey = (d) => {
+    const date = new Date(d);
+    const start = new Date(date.getFullYear(),0,1);
+    const weekNo = Math.ceil(((date - start)/86400000 + start.getDay() +1)/7);
+    return `${date.getFullYear()}-W${String(weekNo).padStart(2,'0')}`;
+  };
+
+  // Build periods list
+  const periods = useMemo(()=>{
+    const m={};
+    closed.forEach(t=>{
+      const d = t.closeDate||t.openDate;
+      if(!d) return;
+      const key = periodView==='monthly' ? d.slice(0,7) : getWeekKey(d);
+      if(!m[key]) m[key]={pnl:0,trades:0,wins:0,losses:0};
+      m[key].trades++;
+      const pnl = Number(t.pnl)||0;
+      m[key].pnl += pnl;
+      if(pnl>0) m[key].wins++;
+      else if(pnl<0) m[key].losses++;
+    });
+    return Object.entries(m).sort((a,b)=>b[0].localeCompare(a[0]));
+  },[closed,periodView]);
+
+  // Filtered trades for selected period
+  const filteredTrades = useMemo(()=>{
+    if(!selectedPeriod) return closed;
+    return closed.filter(t=>{
+      const d = t.closeDate||t.openDate;
+      if(!d) return false;
+      const key = periodView==='monthly' ? d.slice(0,7) : getWeekKey(d);
+      return key === selectedPeriod;
+    });
+  },[closed,selectedPeriod,periodView]);
+
+  // Period-specific stats
+  const periodStats = useMemo(()=>{
+    const ct = filteredTrades;
+    if(!ct.length) return null;
+    const pnls=ct.map(t=>Number(t.pnl)||0);
+    const w=pnls.filter(p=>p>0), l=pnls.filter(p=>p<0);
+    const gp=w.reduce((a,b)=>a+b,0), gl=Math.abs(l.reduce((a,b)=>a+b,0));
+    return {
+      totalPnl:pnls.reduce((a,b)=>a+b,0),
+      trades:ct.length,wins:w.length,losses:l.length,
+      winRate:ct.length>0?w.length/ct.length*100:0,
+      pf:gl>0?gp/gl:(gp>0?Infinity:0),
+      best:pnls.length?Math.max(...pnls):0,
+      worst:pnls.length?Math.min(...pnls):0,
+      avgWin:w.length>0?gp/w.length:0,
+      avgLoss:l.length>0?gl/l.length:0,
+    };
+  },[filteredTrades]);
+
+  // P&L data for chart (trades within selected period or all)
+  const plChartData = useMemo(()=>{
+    const sorted = [...filteredTrades].sort((a,b)=>new Date(a.closeDate||a.openDate||0)-new Date(b.closeDate||b.openDate||0));
+    let cum=0;
+    return sorted.map(t=>{cum+=Number(t.pnl)||0;return {y:cum,label:(t.closeDate||t.openDate||'').slice(5,10)};});
+  },[filteredTrades]);
+
   const monthly = useMemo(()=>{
     const m={};closed.forEach(t=>{if(!t.closeDate&&!t.openDate)return;const d=new Date(t.closeDate||t.openDate);const k=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;if(!m[k])m[k]={pnl:0,trades:0,wins:0};m[k].pnl+=Number(t.pnl)||0;m[k].trades++;if((Number(t.pnl)||0)>0)m[k].wins++;});
     return Object.entries(m).sort((a,b)=>a[0].localeCompare(b[0]));
@@ -1317,6 +1515,46 @@ function Statistics({stats,closed,sessionStats,planCompliance}) {
     <div>
       <div className="page-header"><div><h2>Statistics</h2><p>Comprehensive performance analytics</p></div></div>
 
+      {/* Period Selector */}
+      <div className="card">
+        <div className="card-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div className="card-title">Performance by Period</div>
+          <div style={{display:'flex',gap:'4px'}}>
+            {[['weekly','Weekly'],['monthly','Monthly']].map(([v,l])=>(
+              <button key={v} onClick={()=>{setPeriodView(v);setSelectedPeriod('');}} style={{padding:'3px 12px',borderRadius:'6px',border:'1px solid '+(periodView===v?'var(--accent)':'var(--border)'),background:periodView===v?'var(--accent-light)':'transparent',color:periodView===v?'var(--accent)':'var(--text-3)',fontSize:'11px',fontWeight:600,cursor:'pointer',fontFamily:'var(--font)',transition:'all 0.12s'}}>{l}</button>
+            ))}
+          </div>
+        </div>
+        {/* Period pills */}
+        <div style={{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'14px'}}>
+          <button onClick={()=>setSelectedPeriod('')} style={{padding:'5px 12px',borderRadius:'16px',border:'1px solid '+(!selectedPeriod?'var(--accent)':'var(--border)'),background:!selectedPeriod?'var(--accent-light)':'transparent',color:!selectedPeriod?'var(--accent)':'var(--text-2)',fontSize:'11.5px',fontWeight:500,cursor:'pointer',fontFamily:'var(--font)'}}>All Time</button>
+          {periods.map(([k,d])=>(
+            <button key={k} onClick={()=>setSelectedPeriod(k)} style={{padding:'5px 12px',borderRadius:'16px',border:'1px solid '+(selectedPeriod===k?'var(--accent)':'var(--border)'),background:selectedPeriod===k?'var(--accent-light)':'transparent',color:selectedPeriod===k?'var(--accent)':'var(--text-2)',fontSize:'11.5px',fontWeight:500,cursor:'pointer',fontFamily:'var(--font)'}}>
+              {k} <span className={`mono ${d.pnl>=0?'positive':'negative'}`} style={{marginLeft:'4px',fontSize:'10.5px'}}>{fmtC(d.pnl)}</span>
+            </button>
+          ))}
+        </div>
+        {/* Period stats summary */}
+        {periodStats && (
+          <div>
+            <div className="stats-row">
+              <div className="stat-card"><div className="stat-label">P&L</div><div className={`stat-value ${periodStats.totalPnl>=0?'positive':'negative'}`}>{fmtC(periodStats.totalPnl)}</div></div>
+              <div className="stat-card"><div className="stat-label">Trades</div><div className="stat-value neutral">{periodStats.trades}</div><div className="stat-sub">{periodStats.wins}W / {periodStats.losses}L</div></div>
+              <div className="stat-card"><div className="stat-label">Win Rate</div><div className={`stat-value ${periodStats.winRate>=50?'positive':'negative'}`}>{fmt(periodStats.winRate,1)}%</div></div>
+              <div className="stat-card"><div className="stat-label">Profit Factor</div><div className={`stat-value ${periodStats.pf>=1?'positive':'negative'}`}>{periodStats.pf===Infinity?'∞':fmt(periodStats.pf)}</div></div>
+            </div>
+            <div className="stats-row">
+              <div className="stat-card"><div className="stat-label">Best</div><div className="stat-value positive">{fmtC(periodStats.best)}</div></div>
+              <div className="stat-card"><div className="stat-label">Worst</div><div className="stat-value negative">{fmtC(periodStats.worst)}</div></div>
+              <div className="stat-card"><div className="stat-label">Avg Win</div><div className="stat-value positive">{fmtC(periodStats.avgWin)}</div></div>
+              <div className="stat-card"><div className="stat-label">Avg Loss</div><div className="stat-value negative">{fmtC(-periodStats.avgLoss)}</div></div>
+            </div>
+            {plChartData.length>=2 && <MiniChart dataPoints={plChartData} color={periodStats.totalPnl>=0?'var(--green)':'var(--red)'} />}
+          </div>
+        )}
+      </div>
+
+      {/* Overall stats */}
       <div className="stats-row">
         <div className="stat-card"><div className="stat-label">Total P&L</div><div className={`stat-value ${stats.totalPnl>=0?'positive':'negative'}`}>{fmtC(stats.totalPnl)}</div></div>
         <div className="stat-card"><div className="stat-label">Win Rate</div><div className="stat-value neutral">{fmt(stats.winRate,1)}%</div><div className="stat-sub">{stats.wins}W {stats.losses}L {stats.be}BE</div></div>
